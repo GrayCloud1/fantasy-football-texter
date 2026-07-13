@@ -1,0 +1,31 @@
+name: Fantasy Football Breaking News Alert
+
+on:
+  schedule:
+    # Runs every 5 minutes. GitHub may delay this slightly under load.
+    - cron: "*/5 * * * *"
+  workflow_dispatch: {}  # lets you manually trigger a run from the Actions tab
+
+permissions:
+  contents: write  # needed so the workflow can commit seen_posts.json back
+
+jobs:
+  check-and-alert:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run alert script
+        env:
+          GMAIL_USER: ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          SMS_GATEWAY_ADDRESS: ${{ secrets.SMS_GATEWAY_ADDRESS }}
+        run: python3 fantasy_alert.py
+
+      - name: Commit updated seen_posts.json
+        run: |
+          git config user.name "fantasy-alert-bot"
+          git config user.email "actions@github.com"
+          git add seen_posts.json
+          git diff --quiet --cached || git commit -m "update seen posts"
+          git push
