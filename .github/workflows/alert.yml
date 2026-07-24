@@ -4,13 +4,13 @@ on:
   workflow_dispatch:
     inputs:
       test_mode:
-        description: "Send a one-off test text instead of checking for real news"
+        description: "Send a one-off test notification instead of checking for real news"
         required: false
         default: "false"
         type: boolean
 
 permissions:
-  contents: write  # needed so the workflow can commit state.json back
+  contents: write
 
 jobs:
   check-and-alert:
@@ -20,9 +20,7 @@ jobs:
 
       - name: Run alert script
         env:
-          GMAIL_USER: ${{ secrets.GMAIL_USER }}
-          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
-          SMS_GATEWAY_ADDRESS: ${{ secrets.SMS_GATEWAY_ADDRESS }}
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
           TEST_MODE: ${{ inputs.test_mode }}
         run: python3 fantasy_alert.py
 
@@ -30,6 +28,10 @@ jobs:
         run: |
           git config user.name "fantasy-alert-bot"
           git config user.email "actions@github.com"
-          git add state.json
-          git diff --quiet --cached || git commit -m "update state"
-          git push
+          if [ -f state.json ]; then
+            git add state.json
+            git diff --quiet --cached || git commit -m "update state"
+            git push
+          else
+            echo "state.json not present (likely a test_mode run) - nothing to commit."
+          fi
