@@ -1,43 +1,32 @@
 #!/usr/bin/env python3
 """
-Fantasy Football Breaking News Texter (Sleeper edition)
----------------------------------------------------------
-Uses Sleeper's free, no-auth-required API instead of Reddit (no approval
-process, no registration, works immediately).
+Fantasy Football Breaking News Texter (Sleeper + ntfy.sh edition)
+--------------------------------------------------------------------
+Uses Sleeper's free, no-auth-required API for data, and ntfy.sh for
+free push notifications (carrier email-to-SMS gateways were all
+discontinued in 2025-2026).
 
 Alerts on two signals:
   1. A fantasy-relevant player's injury/roster status changes
-     (e.g. None -> "Questionable", "Questionable" -> "IR")
-  2. A player has a sudden spike in league adds (proxy for breaking news
-     causing a waiver-wire run: trade, breakout, injury return, etc.)
+  2. A player has a sudden spike in league adds
 
-State is kept in state.json, which this script updates each run. Your
-workflow should commit that file back to the repo after each run (see
-.github/workflows/alert.yml).
+State is kept in state.json, committed back by the workflow each run.
 """
 
 import json
 import os
-import smtplib
 import sys
 import time
 import urllib.request
-from email.mime.text import MIMEText
 from pathlib import Path
-
-# ---------- Config ----------
 
 STATE_FILE = Path(__file__).parent / "state.json"
 FANTASY_POSITIONS = {"QB", "RB", "WR", "TE", "K", "DEF"}
-TRENDING_ADD_THRESHOLD = 4000   # add-count to trigger a "spike" alert
+TRENDING_ADD_THRESHOLD = 4000
 TRENDING_LOOKBACK_HOURS = 1
-TRENDING_REALERT_COOLDOWN_SECONDS = 60 * 60 * 6  # don't re-alert same player within 6h
+TRENDING_REALERT_COOLDOWN_SECONDS = 60 * 60 * 6
 
-# ---------- Env vars (set these as GitHub Actions secrets) ----------
-
-GMAIL_USER = os.environ.get("GMAIL_USER")
-GMAIL_APP_PASSWORD = os.environ.get("GMAIL_APP_PASSWORD")
-SMS_GATEWAY_ADDRESS = os.environ.get("SMS_GATEWAY_ADDRESS")
+NTFY_TOPIC = os.environ.get("NTFY_TOPIC")
 
 
 def fetch_json(url):
@@ -57,22 +46,20 @@ def save_state(state):
 
 
 def send_text(subject, body):
-    if not (GMAIL_USER and GMAIL_APP_PASSWORD and SMS_GATEWAY_ADDRESS):
-        print("Missing email/SMS config, skipping send. (Set GMAIL_USER, "
-              "GMAIL_APP_PASSWORD, SMS_GATEWAY_ADDRESS as secrets.)")
+    if not NTFY_TOPIC:
+        print("Missing NTFY_TOPIC secret, skipping send.")
         return
-    msg = MIMEText(body)
-    msg["Subject"] = subject
-    msg["From"] = GMAIL_USER
-    msg["To"] = SMS_GATEWAY_ADDRESS
-    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-        server.login(GMAIL_USER, GMAIL_APP_PASSWORD)
-        server.sendmail(GMAIL_USER, [SMS_GATEWAY_ADDRESS], msg.as_string())
+    req = urllib.request.Request(
+        f"https://ntfy.sh/{NTFY_TOPIC}",
+        data=body.encode("utf-8"),
+        headers={"Title": subject},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        resp.read()
 
 
 def check_status_changes(state, alerts_sent):
-    # active=true filters out retired/inactive players, shrinking the payload
-    # considerably vs. the full ~5MB unfiltered player map
     players = fetch_json("https://api.sleeper.app/v1/players/nfl?active=true")
     prev_status = state["player_status"]
     new_status = {}
@@ -80,15 +67,15 @@ def check_status_changes(state, alerts_sent):
     for pid, p in players.items():
         if p.get("position") not in FANTASY_POSITIONS:
             continue
-        if not p.get("team"):  # skip free agents / retired
+        if not p.get("team"):
             continue
 
-        status = p.get("injury_status")  # e.g. "Questionable", "Out", "IR", None
+        status = p.get("injury_status")
         new_status[pid] = status
 
         old = prev_status.get(pid, "__unseen__")
         if old == "__unseen__":
-            continue  # first time seeing this player, don't alert on baseline
+            continue
         if old != status:
             name = p.get("full_name") or f"{p.get('first_name','')} {p.get('last_name','')}"
             team = p.get("team", "")
@@ -110,8 +97,6 @@ def check_trending_spikes(state, alerts_sent):
     )
     alerted = state["trending_alerted"]
     now = time.time()
-
-    # prune old cooldown entries
     alerted = {pid: ts for pid, ts in alerted.items() if now - ts < TRENDING_REALERT_COOLDOWN_SECONDS}
 
     for entry in trending:
@@ -137,9 +122,9 @@ def check_trending_spikes(state, alerts_sent):
 
 def main():
     if os.environ.get("TEST_MODE") == "true":
-        print("TEST_MODE is on — sending a test text and exiting.")
-        send_text("FF Alert Test", "This is a test text from your fantasy football alert system. If you got this, it's working!")
-        print("Test text sent (if config was correct).")
+        print("TEST_MODE is on — sending a test notification and exiting.")
+        send_text("FF Alert Test", "This is a test notification from your fantasy football alert system. If you got this, it's working!")
+        print("Test notification sent (if config was correct).")
         return
 
     state = load_state()
