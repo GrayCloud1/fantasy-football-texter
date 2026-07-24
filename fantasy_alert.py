@@ -71,7 +71,9 @@ def send_text(subject, body):
 
 
 def check_status_changes(state, alerts_sent):
-    players = fetch_json("https://api.sleeper.app/v1/players/nfl")
+    # active=true filters out retired/inactive players, shrinking the payload
+    # considerably vs. the full ~5MB unfiltered player map
+    players = fetch_json("https://api.sleeper.app/v1/players/nfl?active=true")
     prev_status = state["player_status"]
     new_status = {}
 
@@ -134,6 +136,12 @@ def check_trending_spikes(state, alerts_sent):
 
 
 def main():
+    if os.environ.get("TEST_MODE") == "true":
+        print("TEST_MODE is on — sending a test text and exiting.")
+        send_text("FF Alert Test", "This is a test text from your fantasy football alert system. If you got this, it's working!")
+        print("Test text sent (if config was correct).")
+        return
+
     state = load_state()
     alerts_sent = [0]
 
