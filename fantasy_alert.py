@@ -8,7 +8,9 @@ discontinued in 2025-2026).
 
 Alerts on two signals:
   1. A fantasy-relevant player's injury/roster status changes
-  2. A player has a sudden spike in league adds
+     (e.g. None -> "Questionable", "Questionable" -> "IR")
+  2. A player has a sudden spike in league adds (proxy for breaking news
+     causing a waiver-wire run: trade, breakout, injury return, etc.)
 
 State is kept in state.json, committed back by the workflow each run.
 """
@@ -59,25 +61,28 @@ def send_text(subject, body):
         resp.read()
 
 
-def check_status_changes(state, alerts_sent):
-    players = fetch_json("https://api.sleeper.app/v1/players/nfl?active=true")
+def player_name(p):
+    return p.get("full_name") or f"{p.get('first_name','')} {p.get('last_name','')}".strip()
+
+
+def check_status_changes(state, alerts_sent, players):
     prev_status = state["player_status"]
     new_status = {}
 
     for pid, p in players.items():
         if p.get("position") not in FANTASY_POSITIONS:
             continue
-        if not p.get("team"):
+        if not p.get("team"):  # skip free agents / retired
             continue
 
-        status = p.get("injury_status")
+        status = p.get("injury_status")  # e.g. "Questionable", "Out", "IR", None
         new_status[pid] = status
 
         old = prev_status.get(pid, "__unseen__")
         if old == "__unseen__":
-            continue
+            continue  # first time seeing this player, don't alert on baseline
         if old != status:
-            name = p.get("full_name") or f"{p.get('first_name','')} {p.get('last_name','')}"
+            name = player_name(p)
             team = p.get("team", "")
             if status:
                 body = f"{name} ({team}): status changed to {status}"
@@ -90,13 +95,15 @@ def check_status_changes(state, alerts_sent):
     state["player_status"] = new_status
 
 
-def check_trending_spikes(state, alerts_sent):
+def check_trending_spikes(state, alerts_sent, players):
     trending = fetch_json(
         f"https://api.sleeper.app/v1/players/nfl/trending/add"
         f"?lookback_hours={TRENDING_LOOKBACK_HOURS}&limit=25"
     )
     alerted = state["trending_alerted"]
     now = time.time()
+
+    # prune old cooldown entries
     alerted = {pid: ts for pid, ts in alerted.items() if now - ts < TRENDING_REALERT_COOLDOWN_SECONDS}
 
     for entry in trending:
@@ -106,11 +113,10 @@ def check_trending_spikes(state, alerts_sent):
             continue
         if pid in alerted:
             continue
-        try:
-            player = fetch_json(f"https://api.sleeper.app/v1/players/nfl/{pid}")
-        except Exception:
-            player = {}
-        name = player.get("full_name", f"player {pid}") if isinstance(player, dict) else f"player {pid}"
+        # look up the name from the player list we already have in memory
+        # (there is no reliable single-player Sleeper endpoint to hit here)
+        p = players.get(pid)
+        name = player_name(p) if p else f"player {pid}"
         body = f"{name}: {count} adds in last {TRENDING_LOOKBACK_HOURS}h — likely breaking news"
         print("ALERT:", body)
         send_text("FF Trending Spike", body)
@@ -130,15 +136,25 @@ def main():
     state = load_state()
     alerts_sent = [0]
 
+    # active=true filters out retired/inactive players, shrinking the payload
+    # considerably vs. the full ~5MB unfiltered player map. Fetched once and
+    # reused by both checks below.
     try:
-        check_status_changes(state, alerts_sent)
+        players = fetch_json("https://api.sleeper.app/v1/players/nfl?active=true")
     except Exception as e:
-        print(f"Status check failed: {e}")
+        print(f"Failed to fetch player list: {e}")
+        players = {}
 
-    try:
-        check_trending_spikes(state, alerts_sent)
-    except Exception as e:
-        print(f"Trending check failed: {e}")
+    if players:
+        try:
+            check_status_changes(state, alerts_sent, players)
+        except Exception as e:
+            print(f"Status check failed: {e}")
+
+        try:
+            check_trending_spikes(state, alerts_sent, players)
+        except Exception as e:
+            print(f"Trending check failed: {e}")
 
     save_state(state)
     print(f"Done. {alerts_sent[0]} alert(s) sent.")
