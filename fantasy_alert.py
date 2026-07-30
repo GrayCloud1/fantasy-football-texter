@@ -26,7 +26,8 @@ STATE_FILE = Path(__file__).parent / "state.json"
 FANTASY_POSITIONS = {"QB", "RB", "WR", "TE", "K", "DEF"}
 TRENDING_ADD_THRESHOLD = 4000
 TRENDING_LOOKBACK_HOURS = 1
-TRENDING_REALERT_COOLDOWN_SECONDS = 60 * 60 * 6
+TRENDING_REALERT_COOLDOWN_SECONDS = 60 * 60 * 24  # baseline quiet period if growth is minor
+TRENDING_ESCALATION_MULTIPLIER = 10  # re-alert early only on a massive jump (e.g. 4,000 -> 40,000+)
 
 NTFY_TOPIC = os.environ.get("NTFY_TOPIC")
 
@@ -100,28 +101,32 @@ def check_trending_spikes(state, alerts_sent, players):
         f"https://api.sleeper.app/v1/players/nfl/trending/add"
         f"?lookback_hours={TRENDING_LOOKBACK_HOURS}&limit=25"
     )
-    alerted = state["trending_alerted"]
+    alerted = state["trending_alerted"]  # pid -> {"ts": float, "count": int}
     now = time.time()
 
-    # prune old cooldown entries
-    alerted = {pid: ts for pid, ts in alerted.items() if now - ts < TRENDING_REALERT_COOLDOWN_SECONDS}
+    # prune entries past the baseline cooldown (they're eligible for a fresh alert regardless of growth)
+    alerted = {
+        pid: info for pid, info in alerted.items()
+        if now - info["ts"] < TRENDING_REALERT_COOLDOWN_SECONDS
+    }
 
     for entry in trending:
         pid = entry.get("player_id")
         count = entry.get("count", 0)
         if count < TRENDING_ADD_THRESHOLD:
             continue
-        if pid in alerted:
-            continue
-        # look up the name from the player list we already have in memory
-        # (there is no reliable single-player Sleeper endpoint to hit here)
+
+        prev = alerted.get(pid)
+        if prev is not None and count < prev["count"] * TRENDING_ESCALATION_MULTIPLIER:
+            continue  # already alerted recently and hasn't escalated enough to re-notify
+
         p = players.get(pid)
         name = player_name(p) if p else f"player {pid}"
         body = f"{name}: {count} adds in last {TRENDING_LOOKBACK_HOURS}h — likely breaking news"
         print("ALERT:", body)
         send_text("FF Trending Spike", body)
         alerts_sent[0] += 1
-        alerted[pid] = now
+        alerted[pid] = {"ts": now, "count": count}
 
     state["trending_alerted"] = alerted
 
