@@ -17,13 +17,13 @@ import json
 import os
 import re
 import sys
+import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
 
 FANTASY_POSITIONS = {"QB", "RB", "WR", "TE", "K", "DEF"}
 TOP_N_TRENDING = 10
 LOOKBACK_HOURS = 24
-ESPN_RSS_URL = "https://www.espn.com/espn/rss/nfl/news"
 
 NTFY_TOPIC = os.environ.get("NTFY_TOPIC")
 
@@ -79,25 +79,25 @@ def get_trending_players():
     return results
 
 
-def get_espn_headlines():
-    raw = fetch_text(ESPN_RSS_URL)
-    root = ET.fromstring(raw)
-    items = []
-    for item in root.findall(".//item"):
-        title = item.findtext("title", default="")
-        link = item.findtext("link", default="")
-        items.append({"title": title, "link": link})
-    return items
-
-
-def find_matching_headline(last_name, headlines):
-    if not last_name:
+def search_news_for_player(name):
+    query = urllib.parse.quote(f"{name} NFL")
+    url = f"https://news.google.com/rss/search?q={query}&hl=en-US&gl=US&ceid=US:en"
+    try:
+        raw = fetch_text(url)
+        root = ET.fromstring(raw)
+    except Exception as e:
+        print(f"News search failed for {name}: {e}")
         return None
-    pattern = re.compile(re.escape(last_name), re.IGNORECASE)
-    for h in headlines:
-        if pattern.search(h["title"]):
-            return h
-    return None
+
+    item = root.find(".//item")
+    if item is None:
+        return None
+
+    title = item.findtext("title", default="")
+    link = item.findtext("link", default="")
+    source_el = item.find("source")
+    source = source_el.text if source_el is not None else None
+    return {"title": title, "link": link, "source": source}
 
 
 def main():
@@ -111,24 +111,17 @@ def main():
         print("No trending players found, nothing to report.")
         return
 
-    try:
-        headlines = get_espn_headlines()
-    except Exception as e:
-        print(f"Failed to fetch ESPN headlines: {e}")
-        headlines = []
-
     lines = []
     for p in trending:
-        match = find_matching_headline(p["last_name"], headlines)
+        match = search_news_for_player(p["name"])
         header = f"{p['name']} ({p['team']}) — {p['count']} adds/{LOOKBACK_HOURS}h"
         if match:
-            lines.append(f"{header}\n{match['title']}\n{match['link']}")
+            source_note = f" — {match['source']}" if match.get("source") else ""
+            lines.append(f"{header}\n{match['title']}{source_note}\n{match['link']}")
         else:
             lines.append(f"{header}\nNo matching headline found yet — worth a manual check.")
 
     body = "\n\n".join(lines)
-    # ESPN RSS terms require attribution when displaying their headlines
-    body += "\n\n(Headlines via ESPN)"
 
     print(body)
     send_notification("FF Daily Standouts", body)
