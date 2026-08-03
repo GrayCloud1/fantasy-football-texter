@@ -1,0 +1,18 @@
+name: Fantasy Football Daily Standouts Report
+
+on:
+  schedule:
+    # 13:00 UTC ≈ 9am ET / 6am PT (adjust to taste — a few hours of drift is fine for a daily digest)
+    - cron: "0 13 * * *"
+  workflow_dispatch: {}  # lets you manually trigger a run from the Actions tab to test
+
+jobs:
+  daily-report:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run daily report script
+        env:
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+        run: python3 daily_report.py
