@@ -115,7 +115,7 @@ def main():
     for p in trending:
         match = search_news_for_player(p["name"])
         header = f"{p['name']} ({p['team']}) — {p['count']} adds/{LOOKBACK_HOURS}h"
-       if match:
+        if match:
             source_note = f" — {match['source']}" if match.get("source") else ""
             lines.append(f"{header}\n{match['title']}{source_note}")
         else:
