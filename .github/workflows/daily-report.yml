@@ -2,9 +2,11 @@ name: Fantasy Football Daily Standouts Report
 
 on:
   schedule:
-    # 13:00 UTC ≈ 9am ET / 6am PT (adjust to taste — a few hours of drift is fine for a daily digest)
     - cron: "0 13 * * *"
-  workflow_dispatch: {}  # lets you manually trigger a run from the Actions tab to test
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
 
 jobs:
   daily-report:
@@ -16,3 +18,13 @@ jobs:
         env:
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
         run: python3 daily_report.py
+
+      - name: Commit updated daily_state.json
+        run: |
+          git config user.name "fantasy-alert-bot"
+          git config user.email "actions@github.com"
+          if [ -f daily_state.json ]; then
+            git add daily_state.json
+            git diff --quiet --cached || git commit -m "update daily state"
+            git push
+          fi
