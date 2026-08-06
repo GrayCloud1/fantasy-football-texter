@@ -2,84 +2,73 @@
 """
 Fantasy Football Daily Standouts Report
 ------------------------------------------
-Once-daily digest of players trending up in adds, cross-referenced against
-a per-player Google News search for a short "why" when a matching
-headline can be found.
+Once-daily digest with:
+  - Trending UP: players getting added in bulk, grouped by position,
+    each with a recent news headline when one can be found
+  - Trending DOWN: players getting dropped in bulk (often just as
+    newsworthy - injury, benching, poor camp performance)
+  - Repeat suppression: a player reported in the last 24h won't repeat
+    the next day, so each report surfaces new names
+  - Cross-reference: flags if a trending player's roster/injury status
+    also changed today, per the real-time alert script's state.json
 
-Players reported in the last 24h are suppressed from re-appearing, so each
-day's report surfaces new names rather than repeating yesterday's list.
-State is kept in daily_state.json, committed back by the workflow each run.
-
-Data sources (both free, no auth required):
-  - Sleeper API: trending adds (last 24h) + player names
-  - Google News RSS search: per-player headline lookup
+Data sources (all free, no auth required):
+  - Sleeper API: trending adds/drops (24h) + player names/positions
+  - Google News RSS search: per-player headline lookup (via ff_common)
+  - state.json: written by fantasy_alert.py, read here (not modified)
 """
 
 import json
-import os
-import re
 import sys
 import time
-import urllib.parse
-import urllib.request
-import xml.etree.ElementTree as ET
 from pathlib import Path
 
+from ff_common import fetch_json, player_name, search_news_for_player, send_notification
+
 FANTASY_POSITIONS = {"QB", "RB", "WR", "TE", "K", "DEF"}
-TOP_N_TRENDING = 10          # how many players to actually report on
-CANDIDATE_POOL_SIZE = 30     # how many trending players to pull before filtering repeats
+POSITION_ORDER = ["QB", "RB", "WR", "TE", "K", "DEF"]
+TOP_N_UP = 10
+TOP_N_DOWN = 8
+CANDIDATE_POOL_SIZE = 30
 LOOKBACK_HOURS = 24
-REPEAT_SUPPRESSION_HOURS = 24  # don't re-report the same player within this window
+REPEAT_SUPPRESSION_HOURS = 24
+HEADLINE_MAX_AGE_HOURS = 48
+STATUS_CHANGE_WINDOW_HOURS = 24
 
-STATE_FILE = Path(__file__).parent / "daily_state.json"
-NTFY_TOPIC = os.environ.get("NTFY_TOPIC")
-
-
-def fetch_json(url):
-    req = urllib.request.Request(url, headers={"User-Agent": "fantasy-alert-script/1.0"})
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        return json.loads(resp.read())
+DAILY_STATE_FILE = Path(__file__).parent / "daily_state.json"
+ALERT_STATE_FILE = Path(__file__).parent / "state.json"  # written by fantasy_alert.py
 
 
-def fetch_text(url):
-    req = urllib.request.Request(url, headers={"User-Agent": "fantasy-alert-script/1.0"})
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        return resp.read()
+def load_daily_state():
+    if DAILY_STATE_FILE.exists():
+        state = json.loads(DAILY_STATE_FILE.read_text())
+    else:
+        state = {}
+    state.setdefault("reported_up", {})
+    state.setdefault("reported_down", {})
+    return state
 
 
-def load_state():
-    if STATE_FILE.exists():
-        return json.loads(STATE_FILE.read_text())
-    return {"reported": {}}  # pid -> last-reported unix timestamp
+def save_daily_state(state):
+    DAILY_STATE_FILE.write_text(json.dumps(state))
 
 
-def save_state(state):
-    STATE_FILE.write_text(json.dumps(state))
+def load_alert_state():
+    """Read the real-time alert script's state, if it exists. Never written
+    to from here - this script only reads it for cross-referencing."""
+    if ALERT_STATE_FILE.exists():
+        try:
+            return json.loads(ALERT_STATE_FILE.read_text())
+        except Exception as e:
+            print(f"Could not parse state.json: {e}")
+    return {"player_status": {}, "status_changed_at": {}}
 
 
-def send_notification(subject, body):
-    if not NTFY_TOPIC:
-        print("Missing NTFY_TOPIC secret, skipping send.")
-        return
-    req = urllib.request.Request(
-        f"https://ntfy.sh/{NTFY_TOPIC}",
-        data=body.encode("utf-8"),
-        headers={"Title": subject},
-        method="POST",
-    )
-    with urllib.request.urlopen(req, timeout=15) as resp:
-        resp.read()
-
-
-def player_name(p):
-    return p.get("full_name") or f"{p.get('first_name','')} {p.get('last_name','')}".strip()
-
-
-def get_trending_candidates():
+def get_trending(direction, limit):
     players = fetch_json("https://api.sleeper.app/v1/players/nfl?active=true")
     trending = fetch_json(
-        f"https://api.sleeper.app/v1/players/nfl/trending/add"
-        f"?lookback_hours={LOOKBACK_HOURS}&limit={CANDIDATE_POOL_SIZE}"
+        f"https://api.sleeper.app/v1/players/nfl/trending/{direction}"
+        f"?lookback_hours={LOOKBACK_HOURS}&limit={limit}"
     )
     results = []
     for entry in trending:
@@ -91,73 +80,101 @@ def get_trending_candidates():
             "pid": pid,
             "name": player_name(p),
             "team": p.get("team", ""),
+            "position": p.get("position", ""),
             "count": entry.get("count", 0),
         })
-    return results
+    return results, players
 
 
-def search_news_for_player(name):
-    query = urllib.parse.quote(f"{name} NFL")
-    url = f"https://news.google.com/rss/search?q={query}&hl=en-US&gl=US&ceid=US:en"
-    try:
-        raw = fetch_text(url)
-        root = ET.fromstring(raw)
-    except Exception as e:
-        print(f"News search failed for {name}: {e}")
-        return None
-
-    item = root.find(".//item")
-    if item is None:
-        return None
-
-    title = item.findtext("title", default="")
-    source_el = item.find("source")
-    source = source_el.text if source_el is not None else None
-    return {"title": title, "source": source}
-
-
-def main():
-    state = load_state()
-    now = time.time()
-    reported = state.get("reported", {})
-
-    try:
-        candidates = get_trending_candidates()
-    except Exception as e:
-        print(f"Failed to fetch trending players: {e}")
-        return
-
-    # filter out anyone reported within the suppression window
-    fresh = [
+def filter_unreported(candidates, reported, now):
+    return [
         c for c in candidates
         if now - reported.get(c["pid"], 0) >= REPEAT_SUPPRESSION_HOURS * 3600
     ]
-    selected = fresh[:TOP_N_TRENDING]
 
-    if not selected:
-        print("No new trending players today (all candidates were reported recently).")
-        save_state(state)
+
+def group_by_position(entries):
+    grouped = {pos: [] for pos in POSITION_ORDER}
+    for e in entries:
+        grouped.setdefault(e["position"], []).append(e)
+    return grouped
+
+
+def format_group(grouped, verb, status_lookup=None):
+    lines = []
+    for pos in POSITION_ORDER:
+        entries = grouped.get(pos)
+        if not entries:
+            continue
+        lines.append(f"[{pos}]")
+        for e in entries:
+            line = f"{e['name']} ({e['team']}) — {e['count']} {verb}/{LOOKBACK_HOURS}h"
+            if e.get("headline"):
+                source_note = f" — {e['headline']['source']}" if e["headline"].get("source") else ""
+                line += f"\n  {e['headline']['title']}{source_note}"
+            if status_lookup and e["pid"] in status_lookup:
+                line += f"\n  \u26a0\ufe0f Status also changed today \u2192 {status_lookup[e['pid']]}"
+            lines.append(line)
+    return "\n".join(lines)
+
+
+def main():
+    daily_state = load_daily_state()
+    now = time.time()
+
+    try:
+        up_candidates, players = get_trending("add", CANDIDATE_POOL_SIZE)
+    except Exception as e:
+        print(f"Failed to fetch trending-up players: {e}")
         return
 
-    lines = []
-    for p in selected:
-        match = search_news_for_player(p["name"])
-        header = f"{p['name']} ({p['team']}) — {p['count']} adds/{LOOKBACK_HOURS}h"
-        if match:
-            source_note = f" — {match['source']}" if match.get("source") else ""
-            lines.append(f"{header}\n{match['title']}{source_note}")
-        else:
-            lines.append(f"{header}\nNo matching headline found yet — worth a manual check.")
-        reported[p["pid"]] = now
+    try:
+        down_candidates, _ = get_trending("drop", CANDIDATE_POOL_SIZE)
+    except Exception as e:
+        print(f"Failed to fetch trending-down players: {e}")
+        down_candidates = []
 
-    body = "\n\n".join(lines)
+    alert_state = load_alert_state()
+    status_changed_at = alert_state.get("status_changed_at", {})
+    player_status = alert_state.get("player_status", {})
+    recently_changed_status = {
+        pid: player_status.get(pid)
+        for pid, ts in status_changed_at.items()
+        if now - ts < STATUS_CHANGE_WINDOW_HOURS * 3600
+    }
+
+    fresh_up = filter_unreported(up_candidates, daily_state["reported_up"], now)[:TOP_N_UP]
+    fresh_down = filter_unreported(down_candidates, daily_state["reported_down"], now)[:TOP_N_DOWN]
+
+    if not fresh_up and not fresh_down:
+        print("No new trending players today (all candidates were reported recently).")
+        save_daily_state(daily_state)
+        return
+
+    # attach news headlines for the "up" list only (drops don't usually have
+    # a positive story to surface, and it keeps the call volume reasonable)
+    for e in fresh_up:
+        e["headline"] = search_news_for_player(e["name"], max_age_hours=HEADLINE_MAX_AGE_HOURS)
+        daily_state["reported_up"][e["pid"]] = now
+
+    for e in fresh_down:
+        daily_state["reported_down"][e["pid"]] = now
+
+    sections = []
+    if fresh_up:
+        grouped_up = group_by_position(fresh_up)
+        sections.append("\U0001F4C8 TRENDING UP\n" + format_group(grouped_up, "adds", recently_changed_status))
+    if fresh_down:
+        grouped_down = group_by_position(fresh_down)
+        sections.append("\U0001F4C9 TRENDING DOWN\n" + format_group(grouped_down, "drops", recently_changed_status))
+
+    body = "\n\n".join(sections)
 
     print(body)
     send_notification("FF Daily Standouts", body)
-    print(f"Done. Reported on {len(selected)} new trending player(s).")
+    print(f"Done. Reported {len(fresh_up)} up / {len(fresh_down)} down.")
 
-    state["reported"] = reported
-    save_state(state)
+    save_daily_state(daily_state)
 
 
 if __name__ == "__main__":
