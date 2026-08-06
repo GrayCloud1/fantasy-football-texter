@@ -1,0 +1,18 @@
+name: Fantasy Football Weekly Movers Report
+
+on:
+  schedule:
+    # Sunday 23:00 UTC ≈ 6-7pm ET, after the bulk of Sunday games (adjust as you like)
+    - cron: "0 23 * * 0"
+  workflow_dispatch: {}
+
+jobs:
+  weekly-report:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run weekly report script
+        env:
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+        run: python3 weekly_report.py
