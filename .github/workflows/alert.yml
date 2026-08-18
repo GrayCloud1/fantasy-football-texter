@@ -1,16 +1,13 @@
 name: Fantasy Football Breaking News Alert
 
 on:
-  workflow_dispatch:
-    inputs:
-      test_mode:
-        description: "Send a one-off test notification instead of checking for real news"
-        required: false
-        default: "false"
-        type: boolean
+  schedule:
+    # Runs every 5 minutes. GitHub may delay this slightly under load.
+    - cron: "*/5 * * * *"
+  workflow_dispatch: {}  # lets you manually trigger a run from the Actions tab
 
 permissions:
-  contents: write
+  contents: write  # needed so the workflow can commit seen_posts.json back
 
 jobs:
   check-and-alert:
@@ -20,22 +17,15 @@ jobs:
 
       - name: Run alert script
         env:
-          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
-          TEST_MODE: ${{ inputs.test_mode }}
+          GMAIL_USER: ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          SMS_GATEWAY_ADDRESS: ${{ secrets.SMS_GATEWAY_ADDRESS }}
         run: python3 fantasy_alert.py
 
-      - name: Commit updated state.json
+      - name: Commit updated seen_posts.json
         run: |
           git config user.name "fantasy-alert-bot"
           git config user.email "actions@github.com"
-          if [ -f state.json ]; then
-            git add state.json
-            if ! git diff --quiet --cached; then
-              git commit -m "update state"
-              git fetch origin main
-              git rebase -X ours origin/main || git rebase --abort
-              git push origin main
-            fi
-          else
-            echo "state.json not present (likely a test_mode run) - nothing to commit."
-          fi
+          git add seen_posts.json
+          git diff --quiet --cached || git commit -m "update seen posts"
+          git push
