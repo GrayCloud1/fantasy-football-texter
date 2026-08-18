@@ -24,6 +24,8 @@ import time
 import urllib.request
 from pathlib import Path
 
+from ff_common import search_news_for_player
+
 STATE_FILE = Path(__file__).parent / "state.json"
 FANTASY_POSITIONS = {"QB", "RB", "WR", "TE", "K", "DEF"}
 TRENDING_ADD_THRESHOLD = 4000
@@ -48,15 +50,6 @@ def load_state():
     state.setdefault("player_status", {})
     state.setdefault("trending_alerted", {})
     state.setdefault("status_changed_at", {})
-
-    # discard any old-format entries (pre-escalation-tracking versions stored
-    # a plain float timestamp per player instead of a {"ts":..., "count":...}
-    # dict) so old committed state.json data doesn't crash the new logic
-    state["trending_alerted"] = {
-        pid: info for pid, info in state["trending_alerted"].items()
-        if isinstance(info, dict) and "ts" in info and "count" in info
-    }
-
     return state
 
 
@@ -143,6 +136,12 @@ def check_trending_spikes(state, alerts_sent, players):
         p = players.get(pid)
         name = player_name(p) if p else f"player {pid}"
         body = f"{name}: {count} adds in last {TRENDING_LOOKBACK_HOURS}h — likely breaking news"
+
+        headline = search_news_for_player(name, max_age_hours=24)
+        if headline:
+            source_note = f" — {headline['source']}" if headline.get("source") else ""
+            body += f"\n{headline['title']}{source_note}"
+
         print("ALERT:", body)
         send_text("FF Trending Spike", body)
         alerts_sent[0] += 1
