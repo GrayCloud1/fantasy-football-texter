@@ -96,10 +96,17 @@ def check_status_changes(state, alerts_sent, players):
         if old != status:
             name = player_name(p)
             team = p.get("team", "")
+            position = p.get("position", "")
             if status:
-                body = f"{name} ({team}): status changed to {status}"
+                body = f"{name} ({position}, {team}): status changed to {status}"
             else:
-                body = f"{name} ({team}): status cleared (was {old})"
+                body = f"{name} ({position}, {team}): status cleared (was {old})"
+
+            headline = search_news_for_player(name, max_age_hours=48)
+            if headline:
+                source_note = f" — {headline['source']}" if headline.get("source") else ""
+                body += f"\n{headline['title']}{source_note}"
+
             print("ALERT:", body)
             send_text("FF Status Change", body)
             alerts_sent[0] += 1
