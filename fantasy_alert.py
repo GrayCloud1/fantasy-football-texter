@@ -35,6 +35,21 @@ TRENDING_ESCALATION_MULTIPLIER = 10  # re-alert early only on a massive jump (e.
 
 NTFY_TOPIC = os.environ.get("NTFY_TOPIC")
 
+_full_players_cache = {}
+
+
+def get_full_players():
+    """Fallback lookup for players missing from the lightweight active=true
+    list (e.g. just-signed/elevated players Sleeper hasn't flagged active
+    yet - often exactly when they start trending). Fetched at most once
+    per run, only if actually needed."""
+    if not _full_players_cache:
+        try:
+            _full_players_cache.update(fetch_json("https://api.sleeper.app/v1/players/nfl"))
+        except Exception as e:
+            print(f"Fallback full player fetch failed: {e}")
+    return _full_players_cache
+
 
 def fetch_json(url):
     req = urllib.request.Request(url, headers={"User-Agent": "fantasy-alert-script/1.0"})
@@ -141,6 +156,8 @@ def check_trending_spikes(state, alerts_sent, players):
             continue  # already alerted recently and hasn't escalated enough to re-notify
 
         p = players.get(pid)
+        if p is None:
+            p = get_full_players().get(pid)
         name = player_name(p) if p else f"player {pid}"
         position = p.get("position", "") if p else ""
         team = p.get("team", "") if p else ""
