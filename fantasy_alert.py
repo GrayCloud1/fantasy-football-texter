@@ -142,7 +142,9 @@ def check_trending_spikes(state, alerts_sent, players):
 
         p = players.get(pid)
         name = player_name(p) if p else f"player {pid}"
-        body = f"{name}: {count} adds in last {TRENDING_LOOKBACK_HOURS}h — likely breaking news"
+        position = p.get("position", "") if p else ""
+        team = p.get("team", "") if p else ""
+        body = f"{name} ({position}, {team}): {count} adds in last {TRENDING_LOOKBACK_HOURS}h — likely breaking news"
 
         headline = search_news_for_player(name, max_age_hours=24)
         if headline:
