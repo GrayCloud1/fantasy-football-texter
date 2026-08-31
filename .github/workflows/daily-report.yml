@@ -1,8 +1,6 @@
 name: Fantasy Football Daily Standouts Report
 
 on:
-  schedule:
-    - cron: "0 13 * * *"
   workflow_dispatch: {}
 
 permissions:
@@ -25,6 +23,10 @@ jobs:
           git config user.email "actions@github.com"
           if [ -f daily_state.json ]; then
             git add daily_state.json
-            git diff --quiet --cached || git commit -m "update daily state"
-            git push
+            if ! git diff --quiet --cached; then
+              git commit -m "update daily state"
+              git fetch origin main
+              git rebase -X theirs origin/main || git rebase --abort
+              git push origin main
+            fi
           fi
