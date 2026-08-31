@@ -65,6 +65,7 @@ def load_state():
     state.setdefault("player_status", {})
     state.setdefault("trending_alerted", {})
     state.setdefault("status_changed_at", {})
+    state.setdefault("depth_chart", {})
     return state
 
 
@@ -129,6 +130,58 @@ def check_status_changes(state, alerts_sent, players):
 
     state["player_status"] = new_status
     state["status_changed_at"] = status_changed_at
+
+
+def check_depth_chart_changes(state, alerts_sent, players):
+    """Alerts when a player moves into a starter or top-backup depth chart
+    slot (order 1 or 2) - often the earliest concrete signal of an
+    opportunity change, sometimes ahead of public injury news."""
+    prev = state["depth_chart"]
+    new_depth = {}
+
+    for pid, p in players.items():
+        if p.get("position") not in FANTASY_POSITIONS:
+            continue
+        if not p.get("team"):
+            continue
+
+        order = p.get("depth_chart_order")
+        pos_label = p.get("depth_chart_position") or p.get("position", "")
+        new_depth[pid] = {"position": pos_label, "order": order}
+
+        if order is None:
+            continue  # no depth chart data for this player right now
+
+        prev_info = prev.get(pid)
+        if prev_info is None:
+            continue  # first time seeing depth chart data for this player - establish baseline only
+
+        old_order = prev_info.get("order")
+        if old_order == order:
+            continue  # no change
+
+        moved_up_to_key_slot = old_order is not None and order < old_order and order <= 2
+        newly_earned_starter = old_order is None and order == 1
+
+        if moved_up_to_key_slot or newly_earned_starter:
+            name = player_name(p)
+            team = p.get("team", "")
+            slot = f"{pos_label}{order}"
+            if moved_up_to_key_slot:
+                body = f"{name} ({team}): moved up depth chart to {slot} (was {pos_label}{old_order})"
+            else:
+                body = f"{name} ({team}): now listed as {slot} on depth chart"
+
+            headline = search_news_for_player(name, max_age_hours=48)
+            if headline:
+                source_note = f" — {headline['source']}" if headline.get("source") else ""
+                body += f"\n{headline['title']}{source_note}"
+
+            print("ALERT:", body)
+            send_text("FF Depth Chart Move", body)
+            alerts_sent[0] += 1
+
+    state["depth_chart"] = new_depth
 
 
 def check_trending_spikes(state, alerts_sent, players):
@@ -200,6 +253,11 @@ def main():
             check_status_changes(state, alerts_sent, players)
         except Exception as e:
             print(f"Status check failed: {e}")
+
+        try:
+            check_depth_chart_changes(state, alerts_sent, players)
+        except Exception as e:
+            print(f"Depth chart check failed: {e}")
 
         try:
             check_trending_spikes(state, alerts_sent, players)
