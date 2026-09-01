@@ -28,7 +28,7 @@ from ff_common import search_news_for_player
 
 STATE_FILE = Path(__file__).parent / "state.json"
 FANTASY_POSITIONS = {"QB", "RB", "WR", "TE", "K", "DEF"}
-TRENDING_ADD_THRESHOLD = 4000
+TRENDING_ADD_THRESHOLD = 10000
 TRENDING_LOOKBACK_HOURS = 1
 TRENDING_REALERT_COOLDOWN_SECONDS = 60 * 60 * 24  # baseline quiet period if growth is minor
 TRENDING_ESCALATION_MULTIPLIER = 10  # re-alert early only on a massive jump (e.g. 4,000 -> 40,000+)
