@@ -6,15 +6,17 @@ Uses Sleeper's free, no-auth-required API for data, and ntfy.sh for
 free push notifications (carrier email-to-SMS gateways were all
 discontinued in 2025-2026).
 
-Alerts on two signals:
+Alerts on three signals:
   1. A fantasy-relevant player's injury/roster status changes
      (e.g. None -> "Questionable", "Questionable" -> "IR")
-  2. A player has a sudden spike in league adds, with escalation-based
+     - Suppressed during overnight quiet hours and during bulk-resync
+       bursts (Sleeper occasionally flips many players' status fields
+       at once as routine data housekeeping, not real news)
+  2. A player moves into a starter/top-backup depth chart slot
+  3. A player has a sudden spike in league adds, with escalation-based
      re-alerting (only re-notifies on a big jump, not routine growth)
 
 State is kept in state.json, committed back by the workflow each run.
-Also records status_changed_at timestamps so daily_report.py can flag
-players whose status changed the same day they're trending.
 """
 
 import json
@@ -22,16 +24,29 @@ import os
 import sys
 import time
 import urllib.request
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from ff_common import search_news_for_player
 
 STATE_FILE = Path(__file__).parent / "state.json"
 FANTASY_POSITIONS = {"QB", "RB", "WR", "TE", "K", "DEF"}
-TRENDING_ADD_THRESHOLD = 10000
+TRENDING_ADD_THRESHOLD = 50000
 TRENDING_LOOKBACK_HOURS = 1
 TRENDING_REALERT_COOLDOWN_SECONDS = 60 * 60 * 24  # baseline quiet period if growth is minor
-TRENDING_ESCALATION_MULTIPLIER = 10  # re-alert early only on a massive jump (e.g. 4,000 -> 40,000+)
+TRENDING_ESCALATION_MULTIPLIER = 10  # re-alert early only on a massive jump (e.g. 10,000 -> 100,000+)
+
+# Overnight quiet hours for status-change alerts specifically: real injury/
+# roster news essentially never breaks in these hours (no games, practices,
+# or pressers), so this filters out Sleeper's overnight bulk data resyncs.
+QUIET_HOURS_TZ = "America/Los_Angeles"
+QUIET_HOURS_START = 1   # 1am
+QUIET_HOURS_END = 6     # 6am (exclusive)
+
+# Safety net: if a single run detects more status changes than this, treat
+# it as a bulk resync artifact rather than real news, regardless of time.
+STATUS_BURST_THRESHOLD = 5
 
 NTFY_TOPIC = os.environ.get("NTFY_TOPIC")
 
@@ -55,6 +70,11 @@ def fetch_json(url):
     req = urllib.request.Request(url, headers={"User-Agent": "fantasy-alert-script/1.0"})
     with urllib.request.urlopen(req, timeout=30) as resp:
         return json.loads(resp.read())
+
+
+def in_quiet_hours():
+    now_local = datetime.now(ZoneInfo(QUIET_HOURS_TZ))
+    return QUIET_HOURS_START <= now_local.hour < QUIET_HOURS_END
 
 
 def load_state():
@@ -97,6 +117,10 @@ def check_status_changes(state, alerts_sent, players):
     new_status = {}
     now = time.time()
 
+    # Two-phase: first collect every real change, then decide as a batch
+    # whether this looks like a bulk resync (burst) before sending anything.
+    changes = []  # list of (pid, p, status, old)
+
     for pid, p in players.items():
         if p.get("position") not in FANTASY_POSITIONS:
             continue
@@ -110,23 +134,38 @@ def check_status_changes(state, alerts_sent, players):
         if old == "__unseen__":
             continue  # first time seeing this player, don't alert on baseline
         if old != status:
-            name = player_name(p)
-            team = p.get("team", "")
-            position = p.get("position", "")
-            if status:
-                body = f"{name} ({position}, {team}): status changed to {status}"
-            else:
-                body = f"{name} ({position}, {team}): status cleared (was {old})"
+            changes.append((pid, p, status, old))
 
-            headline = search_news_for_player(name, max_age_hours=48)
-            if headline:
-                source_note = f" — {headline['source']}" if headline.get("source") else ""
-                body += f"\n{headline['title']}{source_note}"
+    quiet = in_quiet_hours()
+    burst = len(changes) > STATUS_BURST_THRESHOLD
+    suppress = quiet or burst
 
-            print("ALERT:", body)
-            send_text("FF Status Change", body)
-            alerts_sent[0] += 1
-            status_changed_at[pid] = now
+    if changes and suppress:
+        reason = "quiet hours" if quiet else f"burst of {len(changes)} changes (likely bulk data resync)"
+        print(f"Suppressing {len(changes)} status-change notification(s): {reason}. State still updated.")
+
+    for pid, p, status, old in changes:
+        status_changed_at[pid] = now  # always record, even if notification suppressed
+
+        if suppress:
+            continue
+
+        name = player_name(p)
+        team = p.get("team", "")
+        position = p.get("position", "")
+        if status:
+            body = f"{name} ({position}, {team}): status changed to {status}"
+        else:
+            body = f"{name} ({position}, {team}): status cleared (was {old})"
+
+        headline = search_news_for_player(name, max_age_hours=48)
+        if headline:
+            source_note = f" — {headline['source']}" if headline.get("source") else ""
+            body += f"\n{headline['title']}{source_note}"
+
+        print("ALERT:", body)
+        send_text("FF Status Change", body)
+        alerts_sent[0] += 1
 
     state["player_status"] = new_status
     state["status_changed_at"] = status_changed_at
